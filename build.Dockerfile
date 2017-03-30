@@ -1,7 +1,4 @@
-FROM ddf73f48a05d97e4f473d0b4ccb53383cbb0647d10e34b62d68bfc859cc6bcf9
-
-ENV WORKING /usr/src/deps
-WORKDIR ${WORKING}
+FROM debian:jessie
 
 RUN apt-get update \
  && apt-get install -y --force-yes --no-install-recommends\
@@ -20,43 +17,50 @@ RUN apt-get update \
       wget \
  && rm -rf /var/lib/apt/lists/*;
 
-ADD version-check.sh library-check.sh ./
+# Make sure sh points bash and not dash
+RUN rm /bin/sh \
+ && ln -s /bin/bash /bin/sh
+
+# Use user 'lfs' for build, work out of /mnt/lfs, and setup env vars
+ENV LFS /mnt/lfs
+WORKDIR /mnt/lfs
+ENV LFS_TOOLS "${LFS}/tools"
+ENV LFS_HOST_TOOLS "/tools"
+ENV LFS_SOURCES "${LFS}/sources"
+RUN mkdir -p "${LFS}" "${LFS_TOOLS}" "${LFS_HOST_TOOLS}" "${LFS_SOURCES}" \
+ && groupadd lfs \
+ && useradd -s /bin/bash -g lfs -m -k /dev/null lfs \
+ && chown -vR lfs:lfs "${LFS}" "${LFS_HOST_TOOLS}"
+USER lfs
+ENV LC_ALL POSIX
+ENV LFS_DIST LFS
+ENV LFS_TARGET "x86_64-${LFS_DIST}-linux-gnu"
+ENV PATH "/tools/bin:/bin:/usr/bin"
+RUN env
 
 # Verify we have the necessary packages, library-check should return all no or
-# all yes, a mix is a problem
-RUN bash version-check.sh \
- && bash library-check.sh
-
-ENV LFS /usr/src/lfs
-
-ADD wget-list md5sums ./
-
-# Download and verify all packages
-RUN mkdir -p "${LFS}/sources" \
+# all yes, a mix is a problem. Then download everything we are going to build,
+# verify the download, unpack the bundles, and place them in non-versioned
+# folders
+ADD version-check.sh library-check.sh wget-list md5sums wget-rename.sh ./
+RUN echo "====== VERSION CHECK ======" \
+ && bash version-check.sh \
+ && echo "====== LIBRARY CHECK ======" \
+ && bash library-check.sh \
+ && chmod -v a+wt "${LFS_SOURCES}" \
  && wget \
       -nv \
       --no-check-certificate \
       --input-file="./wget-list" \
-      --directory-prefix="${LFS}/sources" \
- && cd "${LFS}/sources" \
- && md5sum -c "${WORKING}/md5sums"
+      --directory-prefix="${LFS_SOURCES}" \
+ && cd "${LFS_SOURCES}" \
+ && md5sum -c "${LFS}/md5sums" \
+ && cd "${LFS_SOURCES}" \
+ && bash -x "${LFS}/wget-rename.sh"
 
-ADD wget-rename.sh ./
-RUN cd "${LFS}/sources" \
- && bash -x "${WORKING}/wget-rename.sh"
-
-ENV LC_ALL POSIX
-ENV LFS_DIST LFS
-ENV LFS_TARGET "x86_64-${LFS_DIST}-linux-gnu"
-
-ENV LFS_TOOLS "${LFS}/tools"
-ENV LFS_HOST_TOOLS "/tools"
-RUN mkdir -p "${LFS_TOOLS}" \
- && ln -s "${LFS_TOOLS}" "${LFS_HOST_TOOLS}"
-ENV PATH "${LFS_HOST_TOOLS}/bin:/bin:/usr/bin"
+# Build binutils
 ENV MAKEFLAGS "-j 2"
-
-RUN cd "${LFS}/sources/binutils" \
+RUN cd "${LFS_SOURCES}/binutils" \
  && mkdir -p build \
  && cd build \
  && ../configure \
@@ -64,18 +68,18 @@ RUN cd "${LFS}/sources/binutils" \
       --with-sysroot="${LFS}" \
       --with-lib-path="${LFS_HOST_TOOLS}/lib" \
       --target="${LFS_TARGET}" \
+      --disable-nls \
+      --disable-werror \
  && make \
- && mkdir -p "${LFS}/lib" \
- && ln -s "${LFS}/lib" "${LFS}/lib64" \
- && make install \
- && cd ../ \
- && rm -rf build
+ && mkdir -v "${LFS_HOST_TOOLS}/lib" \
+ && ln -sv "${LFS_HOST_TOOLS}/lib" "${LFS_HOST_TOOLS}/lib64" \
+ && make install
 
 ADD gcc-linker-config.sh ./
 
 # TODO: have gcc-linker-config use $LFS_HOST_TOOLS
 RUN cd "${LFS}/sources/gcc" \
- && bash "${WORKING}/gcc-linker-config.sh" \
+ && bash "${LFS}/gcc-linker-config.sh" \
  && mkdir -p build \
  && cd build \
  && ../configure \
